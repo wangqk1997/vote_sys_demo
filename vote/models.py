@@ -5,6 +5,7 @@ Copyright: Copyright (c) Huawei Technologies Co., Ltd. 2022-2022. All rights res
 Create: 2022-05-16
 Content: Models for vote system
 """
+from ctypes import Structure, c_char_p, c_int, POINTER
 
 from django.contrib.auth.base_user import AbstractBaseUser, BaseUserManager
 from django.contrib.auth.hashers import make_password
@@ -14,8 +15,8 @@ from django.db import models
 class User(AbstractBaseUser):
     """ User model """
     username = models.CharField(max_length=32, unique=True, default="")
-    public_key = models.CharField(max_length=4096, default="")
-    sign = models.CharField(max_length=4096, default="")
+    public_key = models.CharField(max_length=128, default="")
+    sign = models.BinaryField(max_length=256, default=b"")
     login_status = models.BooleanField(default=False)
     vote_status = models.BooleanField(default=False)
 
@@ -86,3 +87,31 @@ class VoteOption(models.Model):
 
     def get_votes_number(self):
         return self.votes_number
+
+
+class UserPubkey(Structure):
+    """
+    User public key structure
+    Reduce the number of input parameters when calling the CA method
+    """
+    _fields_ = [
+        ('username', c_char_p),
+        ('usernameLen', c_int),
+        ('pubkeyPath', c_char_p),
+        ('pubkeyPathLen', c_int),
+        ('sign', c_char_p),
+        ('signLen', c_int)
+    ]
+
+
+class VoteInfo(Structure):
+    """
+    Vote info structure
+    Reduce the number of input parameters when calling the CA method
+    """
+    _fields_ = [
+        ('voteData', c_char_p),
+        ('voteDataLen', c_int),
+        ('voteRes', c_char_p),
+        ('voteResLen', POINTER(c_int))
+    ]

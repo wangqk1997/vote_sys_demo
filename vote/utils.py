@@ -9,12 +9,13 @@ Content: Common utils module
 import logging
 import os
 import re
-from ctypes import cdll, create_string_buffer, c_char_p, c_int, byref, POINTER
+from ctypes import cdll, create_string_buffer, c_char_p, c_int, cast, pointer
 
 from django.contrib.auth import login
 from django.http import JsonResponse
 
-from vote.models import User, VoteOption
+from vote.models import User, VoteOption, UserPubkey, VoteInfo
+from vote_sys_demo.settings import BASE_DIR
 
 SHOW_MSG = {
     'login_name_pwd_error': '用户名或密码错误，请重新输入',
@@ -29,7 +30,16 @@ SHOW_MSG = {
 }
 
 # CA file location
-CA_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'libsecret-vote-ca.so')
+CA_PATH = os.path.join(os.path.dirname(BASE_DIR), 'lib', 'libsecret-vote-ca.so')
+# Public key file location
+KEY_DIRECTORY_PATH = os.path.join(os.path.dirname(BASE_DIR), 'pubkey')
+# Root public key storage address
+ROOT_KEY_STORAGE_PATH = os.path.join(KEY_DIRECTORY_PATH, 'root_pub_key', 'root_pub_key.pem')
+# User public key file location
+USER_PUBLIC_KEY_DIRECTORY_PATH = os.path.join(KEY_DIRECTORY_PATH, 'user_pub_key')
+# TA private key file location
+PRIVATE_KEY_PATH = '/var/itrustee/sec_storage_data/sec_storage_data/secret_vote'
+
 LOGGER = logging.getLogger('vote')
 
 
@@ -59,12 +69,12 @@ def login_user(request, user):
     # Call CA method to get public key and sign
     if len(user.get_public_key()) == 0:
         LOGGER.info('User logs in for the first time')
-        public_key, sign = generate_public_key_and_sign()
-        if len(public_key) == 0:
+        gene_result, sign = generate_public_key_and_sign(user.get_username())
+        if gene_result != 0:
             LOGGER.error('Failed to call CA GetTaskPubKey method')
             return JsonResponse(status=403, data=new_generate_response_body('login_error'))
-        user.set_public_key(public_key)
-        user.set_sign(sign)
+        user.set_public_key(os.path.join(USER_PUBLIC_KEY_DIRECTORY_PATH, user.get_username() + '.pub'))
+        user.set_sign(sign.raw)
     user.save()
 
     # Add user message to current session
@@ -105,22 +115,29 @@ def new_generate_response_body(message_title, data=None):
     return {'data': data, 'info_chinese': SHOW_MSG.get(message_title)}
 
 
-def generate_public_key_and_sign():
+def generate_public_key_and_sign(username):
     """
     Call CA method to generate public key and related sign
     This method is only called when the user logs in for the first time
     :return: Public key and related sign
     """
     ca = cdll.LoadLibrary(CA_PATH)
-    ca.GetTaskPubKey.argtypes = [c_char_p, c_int, c_char_p, c_int]
+    ca.GetTaskPubKey.argtypes = [UserPubkey]
     ca.GetTaskPubKey.restype = c_int
-    key_buf = create_string_buffer(4096)
-    sign_buf = create_string_buffer(4096)
-    result = ca.GetTaskPubKey(key_buf, 4096, sign_buf, 4096)
-    if result != 0:
-        key_buf = ''
-        sign_buf = ''
-    return bytes(key_buf), bytes(sign_buf)
+
+    # Initialize UserPubkey instant
+    key_inv = UserPubkey()
+    sign_buf = create_string_buffer(256)
+    key_inv.sign = cast(sign_buf, c_char_p)
+    key_inv.signLen = 256
+    key_inv.pubkeyPath = os.path.join(USER_PUBLIC_KEY_DIRECTORY_PATH, username + '.pub').encode()
+    key_inv.pubkeyPathLen = len(key_inv.pubkeyPath)
+    key_inv.username = username.encode()
+    key_inv.usernameLen = len(username)
+
+    # Call CA method
+    result = ca.CreateTaskPubkey(key_inv)
+    return result, sign_buf
 
 
 def assemble_vote_data(user_vote_status):
@@ -164,17 +181,28 @@ def send_vote_msg(user, vote_id):
     :param user: User object
     :param vote_id: vote option id
     """
-    # Get CA method arguments
-    public_key = user.get_public_key().encode()
-    sign = user.get_sign().encode()
-    username = user.get_username().encode()
-    vote_result = c_int(0)
+    # Initialize UserPubkey instant
+    key_inv = UserPubkey()
+    key_inv.sign = user.get_sign()
+    key_inv.signLen = len(user.get_sign())
+    key_inv.pubkeyPath = user.get_public_key().encode()
+    key_inv.pubkeyPathLen = len(key_inv.pubkeyPath)
+    key_inv.username = user.get_username().encode()
+    key_inv.usernameLen = len(key_inv.username)
+
+    # Initialize VoteInfo instant
+    vote_info = VoteInfo()
+    vote_info.voteData = str(vote_id).encode()
+    vote_info.voteDataLen = len(vote_info.voteData)
+    vote_info.voteRes = cast(create_string_buffer(vote_info.voteDataLen), c_char_p)
+    vote_info.voteResLen = pointer(c_int(vote_info.voteDataLen))
 
     # Call CA vote method
     ca = cdll.LoadLibrary(CA_PATH)
-    ca.Vote.argtypes = [c_char_p, c_int, c_char_p, c_int, c_char_p, c_int, c_int, POINTER(c_int)]
+    ca.Vote.argtypes = [c_char_p, c_int, UserPubkey, VoteInfo]
     ca.Vote.restype = c_int
-    result = ca.Vote(public_key, 4096, sign, 4096, username, len(username), c_int(vote_id), byref(vote_result))
+    root_key_path = ROOT_KEY_STORAGE_PATH.encode()
+    result = ca.Vote(root_key_path, len(root_key_path), key_inv, vote_info)
     if result != 0:
-        vote_result = -1
-    return vote_result.value
+        vote_info.voteRes = -1
+    return int(vote_info.voteRes)

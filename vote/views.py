@@ -108,7 +108,7 @@ def vote(request):
         return JsonResponse(status=403, data=new_generate_response_body('vote_failed'))
 
     # Update vote result
-    vote_option = VoteOption.objects.get(option_id=int(vote_id))
+    vote_option = VoteOption.objects.get(option_id=int(vote_result))
     vote_option.set_votes_number(vote_option.get_votes_number() + 1)
     vote_option.save()
     user.set_vote_status(True)
